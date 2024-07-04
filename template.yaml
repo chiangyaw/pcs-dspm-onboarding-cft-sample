@@ -1,0 +1,477 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Roles and permissions required by Dig Security
+Parameters:
+  ExternalId:
+    Type: String
+  OrchestratorAccountId:
+    Type: String
+  DigSecurityAccountId:
+    Type: String
+    Default: '092708045729'
+  DigSecurityReadOnlyRoleName:
+    Type: String
+    Default: 'DigSecurityReadOnlyRoleuse1'
+  DigSecurityScannerRoleName:
+    Type: String
+    Default: 'DigSecurityScannerRoleuse1'
+  DigSecurityOrchestratorRoleName:
+    Type: String
+    Default: 'DigSecurityOrchestratorRoleuse1'
+  DigSecurityOrchestratorInstanceProfileName:
+    Type: String
+    Default: 'DigSecurityOrchestratorInstanceProfileuse1'
+  DigTenantId:
+    Type: String
+    Default: 'Unknown' # Default value for backward compatibility
+  CFWrapperVersion:
+    Type: Number
+    Default: 0 # Default value for backward compatibility
+  Orchestrator:
+    Type: String
+    Default: 'false'
+  CFWrapperStackId:
+    Type: String
+    Default: 'Unknown'
+  DeploymentMethodTagValue:
+    Type: String
+    Default: 'CloudFormation'
+Conditions:
+  CreateOrchestrator: !Or [ !Equals [ !Ref 'AWS::AccountId', !Ref 'OrchestratorAccountId' ], !Equals [ !Ref 'Orchestrator', 'true' ] ]
+  EnableDigSecurityAccountOnboarder: !Not [ !Equals [ !Ref 'DigTenantId', 'Unknown' ] ]
+Resources:
+  DigSecurityAccountOnboarder:
+    Condition: EnableDigSecurityAccountOnboarder
+    DependsOn:
+    - DigSecurityReadOnlyRole
+    - DigSecurityScannerRole
+    Type: 'Custom::DigSecurityAccountOnboarder'
+    Properties:
+      ServiceToken: !Sub 'arn:aws:sns:${AWS::Region}:${DigSecurityAccountId}:prod-use1-onboarding-custom-resource'
+      DigTenantId: !Ref 'DigTenantId'
+      AWSAccount: !Ref 'AWS::AccountId'
+      ExternalId: !Ref 'ExternalId'
+      DigSecurityReadOnlyRoleName: !Ref 'DigSecurityReadOnlyRoleName'
+      DigSecurityScannerRoleName: !Ref 'DigSecurityScannerRoleName'
+      DigSecurityOrchestratorRoleName: !Ref 'DigSecurityOrchestratorRoleName'
+      DigSecurityOrchestratorInstanceProfileName: !Ref 'DigSecurityOrchestratorInstanceProfileName'
+      CFTemplateVersion: '29'
+      CFWrapperVersion: !Ref 'CFWrapperVersion'
+      OrchestratorAccountId: !If [ CreateOrchestrator, !Ref 'AWS::AccountId', !Ref 'OrchestratorAccountId' ]
+      Orchestrator: !Ref 'Orchestrator'
+      OnboardingType: 'CF_SINGLE'
+      CFWrapperStackId: !Ref 'CFWrapperStackId'
+      CloudProvider: 'AWS'
+  DigSecurityReadOnlyRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Ref 'DigSecurityReadOnlyRoleName'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Ref 'ExternalId'
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${DigSecurityAccountId}:root'
+            Effect: Allow
+        Version: 2012-10-17
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/ReadOnlyAccess'
+        - 'arn:aws:iam::aws:policy/AmazonMemoryDBReadOnlyAccess'
+      Tags:
+        - Key: dig-security
+          Value: 'true'
+        - Key: version
+          Value: '29'
+        - Key: dig-security:deployment-method
+          Value: !Ref 'DeploymentMethodTagValue'
+  DigSecurityScannerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Ref 'DigSecurityScannerRoleName'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Ref 'ExternalId'
+            Principal:
+              AWS:
+                !If [
+                  CreateOrchestrator,
+                  !GetAtt DigSecurityOrchestratorRole.Arn,
+                  !Sub 'arn:aws:iam::${OrchestratorAccountId}:role/${DigSecurityOrchestratorRoleName}',
+                ]
+            Effect: Allow
+          - Action: 'sts:AssumeRole'
+            Principal:
+              Service:
+                - export.rds.amazonaws.com
+                - events.amazonaws.com
+                - redshift.amazonaws.com
+            Effect: Allow
+      Policies:
+        - PolicyName: DigSecurityScannerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - 'ec2:DeleteSnapshot'
+                  - 'ec2:ModifySnapshotAttribute'
+                Resource: 'arn:aws:ec2:*::snapshot/*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/dig-security': 'true'
+                Effect: Allow
+              - Action:
+                  - 'rds:DeleteDBClusterSnapshot'
+                  - 'rds:DeleteDBSnapshot'
+                  - 'redshift:DeleteClusterSnapshot'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/dig-security': 'true'
+                Effect: Allow
+              - Action:
+                  - 'kms:Encrypt'
+                  - 'kms:GenerateDataKeyWithoutPlaintext'
+                Resource: '*'
+                Condition:
+                  ForAnyValue:StringLike:
+                    'kms:ResourceAliases': 'alias/dig-security*'
+                Effect: Allow
+              - Action:
+                  - 'kms:CreateGrant'
+                  - 'kms:ListGrants'
+                Resource: '*'
+                Condition:
+                  Bool:
+                    'kms:GrantIsForAWSResource': 'true'
+                Effect: Allow
+              - Action:
+                  - 'kms:ReEncryptTo'
+                Resource: '*'
+                Condition:
+                  ForAnyValue:StringLike:
+                    'kms:ViaService': 'ec2.*.amazonaws.com'
+                Effect: Allow
+              - Action:
+                  - 'kms:DeleteAlias'
+                  - 'kms:UntagResource'
+                Resource:
+                  - !Sub 'arn:aws:kms:*:${AWS::AccountId}:alias/dig-security*'
+                  - !Sub 'arn:aws:kms:*:${AWS::AccountId}:key/*'
+                Effect: Allow
+              - Action:
+                  - 'aoss:APIAccessAll'
+                  - 'aoss:CreateAccessPolicy'
+                  - 'aoss:CreateSecurityPolicy'
+                  - 'aoss:DeleteAccessPolicy'
+                  - 'aoss:DeleteSecurityPolicy'
+                  - 'aoss:GetAccessPolicy'
+                  - 'aoss:GetSecurityPolicy'
+                  - 'bedrock:List*'
+                  - 'bedrock:Get*'
+                  - 'cloudwatch:GetMetricData'
+                  - 'dynamodb:CreateBackup'
+                  - 'dynamodb:CreateTable'
+                  - 'dynamodb:DeleteBackup'
+                  - 'dynamodb:Describe*'
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:GetRecords'
+                  - 'dynamodb:ImportTable'
+                  - 'dynamodb:List*'
+                  - 'dynamodb:Query'
+                  - 'dynamodb:RestoreTableFromAwsBackup'
+                  - 'dynamodb:RestoreTableFromBackup'
+                  - 'dynamodb:RestoreTableToPointInTime'
+                  - 'dynamodb:Scan'
+                  - 'dynamodb:StartAwsBackupJob'
+                  - 'dynamodb:TagResource'
+                  - 'dynamodb:UpdateContinuousBackups'
+                  - 'ec2:CopySnapshot'
+                  - 'ec2:CreateSnapshots'
+                  - 'ec2:CreateTags'
+                  - 'ec2:DescribeAvailabilityZones'
+                  - 'ec2:DescribeImages'
+                  - 'ec2:DescribeInstances'
+                  - 'ec2:DescribeRegions'
+                  - 'ec2:DescribeSnapshots'
+                  - 'events:Describe*'
+                  - 'events:List*'
+                  - 'events:PutRule'
+                  - 'events:TagResource'
+                  - 'kms:CreateAlias'
+                  - 'kms:CreateKey'
+                  - 'kms:Decrypt'
+                  - 'kms:DescribeKey'
+                  - 'kms:GenerateDataKey'
+                  - 'kms:GenerateRandom'
+                  - 'kms:ListAliases'
+                  - 'kms:ListKeys'
+                  - 'kms:ListResourceTags'
+                  - 'kms:TagResource'
+                  - 'rds:AddTagsToResource'
+                  - 'rds:CancelExportTask'
+                  - 'rds:CreateDBClusterSnapshot'
+                  - 'rds:CreateDBSnapshot'
+                  - 'rds:Describe*'
+                  - 'rds:List*'
+                  - 'rds:StartExportTask'
+                  - 'redshift-serverless:DeleteResourcePolicy'
+                  - 'redshift-serverless:GetResourcePolicy'
+                  - 'redshift-serverless:PutResourcePolicy'
+                  - 'redshift:AuthorizeSnapshotAccess'
+                  - 'redshift:CopyClusterSnapshot'
+                  - 'redshift:CreateClusterSnapshot'
+                  - 'redshift:CreateSnapshotCopyGrant'
+                  - 'redshift:CreateTags'
+                  - 'redshift:DeleteSnapshotCopyGrant'
+                  - 'redshift:Describe*'
+                  - 'redshift:DisableSnapshotCopy'
+                  - 'redshift:EnableSnapshotCopy'
+                  - 'redshift:List*'
+                  - 'redshift:RevokeSnapshotAccess'
+                  - 's3:Get*'
+                  - 's3:List*'
+                  - 'schemas:Describe*'
+                  - 'schemas:List*'
+                  - 'sts:DecodeAuthorizationMessage'
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                  - 's3:CreateBucket'
+                  - 's3:DeleteBucket'
+                  - 's3:DeleteObject'
+                  - 's3:DeleteObjectVersion'
+                  - 's3:PutBucketNotification'
+                  - 's3:PutBucketPolicy'
+                  - 's3:PutBucketPublicAccessBlock'
+                  - 's3:PutBucketTagging'
+                  - 's3:PutBucketVersioning'
+                  - 's3:PutEncryptionConfiguration'
+                  - 's3:PutLifecycleConfiguration'
+                  - 's3:PutObject'
+                  - 's3:PutObjectRetention'
+                Resource:
+                  - 'arn:aws:s3:::dig-security*'
+                  - 'arn:aws:s3:::dig-security*/*'
+                Effect: Allow
+              - Action:
+                  - 'iam:PassRole'
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${DigSecurityScannerRoleName}'
+                Effect: Allow
+              - Action:
+                  - 'dynamodb:BatchWriteItem'
+                  - 'dynamodb:DeleteItem'
+                  - 'dynamodb:DeleteTable'
+                  - 'dynamodb:DeleteTableReplica'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UntagResource'
+                  - 'dynamodb:UpdateItem'
+                Resource: !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/dig-security*'
+                Effect: Allow
+              - Action:
+                  - 'events:DeleteRule'
+                  - 'events:DisableRule'
+                  - 'events:EnableRule'
+                  - 'events:PutTargets'
+                  - 'events:RemoveTargets'
+                Resource: !Sub 'arn:aws:events:*:${AWS::AccountId}:rule/dig-security*'
+                Effect: Allow
+              - Action:
+                  - 'events:PutEvents'
+                Resource: !Sub 'arn:aws:events:*:${DigSecurityAccountId}:event-bus/dig-security*'
+                Effect: Allow
+              - Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:*:${AWS::AccountId}:secret:dig-security-*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/dig-security': 'true'
+                Effect: Allow
+      Tags:
+        - Key: dig-security
+          Value: 'true'
+        - Key: version
+          Value: '29'
+        - Key: dig-security:deployment-method
+          Value: !Ref 'DeploymentMethodTagValue'
+  DigSecurityOrchestratorRole:
+    Condition: CreateOrchestrator
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Ref 'DigSecurityOrchestratorRoleName'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Ref 'ExternalId'
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${DigSecurityAccountId}:root'
+            Effect: Allow
+          - Action: 'sts:AssumeRole'
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Effect: Allow
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/ReadOnlyAccess'
+        - 'arn:aws:iam::aws:policy/AmazonMemoryDBReadOnlyAccess'
+      Policies:
+        - PolicyName: DigSecurityOrchestratorPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - 'aoss:CreateVpcEndpoint'
+                  - 'ec2:AllocateAddress'
+                  - 'ec2:CreateNatGateway'
+                  - 'ec2:CreateRoute'
+                  - 'ec2:CreateRouteTable'
+                  - 'ec2:CreateSubnet'
+                  - 'ec2:AssociateAddress'
+                  - 'ec2:AssociateRouteTable'
+                  - 'ec2:AttachInternetGateway'
+                  - 'ec2:AuthorizeSecurityGroupEgress'
+                  - 'ec2:AuthorizeSecurityGroupIngress'
+                  - 'ec2:CreateSecurityGroup'
+                  - 'ec2:CreateTags'
+                  - 'ec2:CreateVpcEndpoint'
+                  - 'ec2:ModifySecurityGroupRules'
+                  - 'ec2:RunInstances'
+                  - 'elasticfilesystem:ClientMount'
+                  - 'iam:CreateServiceLinkedRole'
+                  - 'redshift-data:Describe*'
+                  - 'redshift-data:GetStatementResult'
+                  - 'redshift-data:List*'
+                  - 'redshift-serverless:CreateNamespace'
+                  - 'redshift-serverless:CreateWorkgroup'
+                  - 'redshift-serverless:GetNamespace'
+                  - 'redshift-serverless:GetWorkgroup'
+                  - 'redshift-serverless:ListNamespaces'
+                  - 'redshift-serverless:RestoreFromSnapshot'
+                  - 'redshift-serverless:TagResource'
+                  - 'sts:DecodeAuthorizationMessage'
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                  - 'ec2:CreateVpc'
+                  - 'ec2:CreateInternetGateway'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestTag/dig-security': 'true'
+                Effect: Allow
+              - Action:
+                  - 'ec2:DeleteInternetGateway'
+                  - 'ec2:DeleteNatGateway'
+                  - 'ec2:DeleteRoute'
+                  - 'ec2:DeleteRouteTable'
+                  - 'ec2:DeleteSubnet'
+                  - 'ec2:DeleteVpc'
+                  - 'ec2:DetachInternetGateway'
+                  - 'ec2:AssociateVpcCidrBlock'
+                  - 'ec2:DeleteSecurityGroup'
+                  - 'ec2:ModifyVpcAttribute'
+                  - 'ec2:TerminateInstances'
+                  - 'redshift-data:BatchExecuteStatement'
+                  - 'redshift-data:CancelStatement'
+                  - 'redshift-data:ExecuteStatement'
+                  - 'redshift-serverless:DeleteNamespace'
+                  - 'redshift-serverless:DeleteWorkgroup'
+                  - 'redshift-serverless:GetCredentials'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/dig-security': 'true'
+                Effect: Allow
+              - Action:
+                  - 'kms:Decrypt'
+                  - 'kms:DisableKeyRotation'
+                  - 'kms:EnableKeyRotation'
+                  - 'kms:Encrypt'
+                  - 'kms:GenerateDataKeyWithoutPlaintext'
+                  - 'kms:GetKeyRotationStatus'
+                  - 'kms:ReEncryptFrom'
+                Resource: '*'
+                Condition:
+                  ForAnyValue:StringLike:
+                    'kms:ResourceAliases': 'alias/dig-security*'
+                  StringEquals:
+                    'aws:ResourceTag/dig-security': 'true'
+                Effect: Allow
+              - Action:
+                  - 'kms:CreateGrant'
+                Resource: '*'
+                Condition:
+                  ForAnyValue:StringLike:
+                    'kms:ResourceAliases': 'alias/dig-security*'
+                  Bool:
+                    'kms:GrantIsForAWSResource': 'true'
+                Effect: Allow
+              - Action:
+                  - 's3:CreateBucket'
+                  - 's3:DeleteBucket'
+                  - 's3:DeleteObject'
+                  - 's3:PutBucketNotification'
+                  - 's3:PutBucketPolicy'
+                  - 's3:PutBucketPublicAccessBlock'
+                  - 's3:PutBucketTagging'
+                  - 's3:PutBucketVersioning'
+                  - 's3:PutEncryptionConfiguration'
+                  - 's3:PutObject'
+                Resource:
+                  - 'arn:aws:s3:::dig-security*'
+                  - 'arn:aws:s3:::dig-security*/*'
+                Effect: Allow
+              - Action:
+                  - 'sts:AssumeRole'
+                Resource: !Sub 'arn:aws:iam::*:role/${DigSecurityScannerRoleName}'
+                Effect: Allow
+              - Action:
+                  - 'iam:PassRole'
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${DigSecurityOrchestratorRoleName}'
+                  - !Sub 'arn:aws:iam::*:role/${DigSecurityScannerRoleName}'
+                Effect: Allow
+              - Action:
+                  - 'secretsmanager:CreateSecret'
+                  - 'secretsmanager:GetSecretValue'
+                  - 'secretsmanager:PutSecretValue'
+                  - 'secretsmanager:TagResource'
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:*:${AWS::AccountId}:secret:dig-security-*'
+                Condition:
+                  StringEquals:
+                    'aws:ResourceTag/dig-security': 'true'
+                Effect: Allow
+              - Action:
+                  - 'route53:AssociateVPCWithHostedZone'
+                  - 'route53:ChangeResourceRecordSets'
+                  - 'route53:CreateHostedZone'
+                  - 'route53:DeleteHostedZone'
+                Resource: '*'
+                Effect: Allow
+                Condition:
+                  ForAnyValue:StringEquals:
+                    'aws:CalledVia': 'aoss.amazonaws.com'
+      Tags:
+        - Key: dig-security
+          Value: 'true'
+        - Key: version
+          Value: '29'
+        - Key: dig-security:deployment-method
+          Value: !Ref 'DeploymentMethodTagValue'
+  DigSecurityOrchestratorInstanceProfile:
+    Condition: CreateOrchestrator
+    DependsOn: DigSecurityOrchestratorRole
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      InstanceProfileName: !Ref 'DigSecurityOrchestratorInstanceProfileName'
+      Roles:
+        - !Ref DigSecurityOrchestratorRole

@@ -1,0 +1,20 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Roles and permissions required by Dig Security
+Resources:
+  DigSecurityStack:
+    Type: 'AWS::CloudFormation::Stack'
+    Properties:
+      Parameters:
+        ExternalId: '<Your External ID>'
+        OrchestratorAccountId: ''
+        DigTenantId: '<Dig Tenant ID'
+        Orchestrator: 'true'
+        CFWrapperStackId: !Ref 'AWS::StackId'
+        CFWrapperVersion: '11'
+        DeploymentMethodTagValue: 'CloudFormation Single Account'
+      Tags:
+        - Key: dig-security
+          Value: 'true'
+        - Key: version
+          Value: '11'
+      TemplateURL: 'https://dig-use1-onboarding-bucket.s3.amazonaws.com/aws/cloudformation/template.yaml'
